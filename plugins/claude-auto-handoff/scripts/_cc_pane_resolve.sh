@@ -23,12 +23,22 @@ _capture_pane() {
 }
 
 # pane_is_idle <pane> → 0(idle=注入可) / 1(busy または不明=注入しない)。
-# Claude Code REPL は生成中に "esc to interrupt" を表示する。これが見えれば busy。
+# Claude Code REPL は生成中に busy を示す: tool/stream 中は "esc to interrupt"、生成スピナーは
+# "✶ Doing… (5s · thinking)" 等の『… (Ns · …)』タイマ (実機 capture で確認: thinking 中は
+# esc to interrupt が出ずスピナータイマのみのことがある → esc 単独検出では false idle になり、
+# 圧縮完了待ち poll が早期離脱しテキスト未着地を招く = Codex Important)。両者を busy とみなす。
+# ★スピナーは Claude のステータス行形式 "…WORD (Ns · …)" に限定 (`… \([0-9]+s ·`): 省略記号 "…" +
+#   タイマ括弧 "(Ns" + 中黒 "·" の 3 点を要求する。アンカーが緩いと通常応答テキストを busy 誤検出し、
+#   その行が可視末尾に残る間 idle pane を永久 busy 化して圧縮を止める (Codex Important): `(Ns · ` 単独 →
+#   "benchmark (5s · completed)" 誤検出 / `… (Ns` のみ → "Doing… (5s later)" 誤検出。中黒まで要求すれば
+#   どちらも除外され、実機スピナー "(Ns · thinking)" だけが残る。
+# ★scrollback 履歴に同種文字列が残っても誤検出しないよう live ステータス域 = 末尾 18 行に限定する。
 # capture 失敗・空は「不明」→ 安全側で busy 扱い (turn 中の誤注入を避ける)。
 pane_is_idle() {
     local pane="$1"; [ -n "${pane}" ] || return 1
     local cap; cap="$(_capture_pane "${pane}" 2>/dev/null || true)"
     [ -n "${cap}" ] || return 1
-    printf '%s' "${cap}" | grep -qiE 'esc to interrupt' && return 1
+    local tail_area; tail_area="$(printf '%s' "${cap}" | tail -18)"
+    printf '%s' "${tail_area}" | grep -qiE 'esc to interrupt|… \([0-9]+s ·' && return 1
     return 0
 }

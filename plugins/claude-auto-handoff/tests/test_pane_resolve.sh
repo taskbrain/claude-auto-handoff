@@ -31,6 +31,21 @@ assert_eq "$(resolve_pane_by_cwd "${T}")" "" "cwd 未一致は空"
 _capture_pane() { printf '%s' "${FAKE_CAP:-}"; }
 out=$(FAKE_CAP="app ❯ ready"               pane_is_idle p1 && echo IDLE || echo BUSY); assert_eq "${out}" "IDLE" "idle 画面 → idle"
 out=$(FAKE_CAP="generating… esc to interrupt" pane_is_idle p1 && echo IDLE || echo BUSY); assert_eq "${out}" "BUSY" "生成中 (esc to interrupt) → busy"
+# 生成スピナーは esc to interrupt を伴わないことがある (実機 capture で確認) → タイマ '(Ns · …)' を busy 判定 (Codex Important)
+out=$(FAKE_CAP="✶ Doing… (5s · thinking)"     pane_is_idle p1 && echo IDLE || echo BUSY); assert_eq "${out}" "BUSY" "生成スピナー (Ns · thinking) → busy"
+out=$(FAKE_CAP="✽ Channelling… (12s · thinking)" pane_is_idle p1 && echo IDLE || echo BUSY); assert_eq "${out}" "BUSY" "別スピナー文言でもタイマで busy"
+# idle ステータスの数値表示 ('⏱ 0s' / '(4h30m→...)') は busy パターンに一致しない (false busy 防止)
+out=$(FAKE_CAP="❯ ready
+   ⏱ 0s │ 💰 \$0.00
+   5h █░ 15% (4h30m→06/22)" pane_is_idle p1 && echo IDLE || echo BUSY); assert_eq "${out}" "IDLE" "idle ステータスの数値 (0s/(4h30m→)) は busy 誤検出しない"
+# 通常応答テキスト中の '(Ns · …)' は省略記号アンカー無しで busy 誤検出しない (Codex Important 2nd round)
+out=$(FAKE_CAP="assistant: benchmark finished (5s · completed)
+─────
+❯ ready" pane_is_idle p1 && echo IDLE || echo BUSY); assert_eq "${out}" "IDLE" "応答テキストの '(5s · completed)' (… 無し) は busy 誤検出しない"
+# '…' + '(Ns' でも中黒 '·' が無い通常文 ("Doing… (5s later)") は busy 誤検出しない (Codex 3rd round / 中黒アンカー)
+out=$(FAKE_CAP="note: Doing… (5s later) we continue
+─────
+❯ ready" pane_is_idle p1 && echo IDLE || echo BUSY); assert_eq "${out}" "IDLE" "'… (5s later)' (中黒なし) は busy 誤検出しない"
 out=$(FAKE_CAP=""                             pane_is_idle p1 && echo IDLE || echo BUSY); assert_eq "${out}" "BUSY" "capture 空 (不明) → busy"
 out=$(pane_is_idle "" && echo IDLE || echo BUSY); assert_eq "${out}" "BUSY" "空 pane → busy"
 

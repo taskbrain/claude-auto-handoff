@@ -44,16 +44,123 @@ decide_action() {
 
 # 継続プロンプト (kick)。residual 検出と同一文字列を参照するため変数化。
 CONTINUATION_PROMPT="直前の文脈は自動圧縮された。SessionStart で復元されたハンドオフ (この上に注入されている) を唯一の信頼源として、状態を 3-5 文で言い直してから作業を継続せよ。"
-# residual 検出に使う部分文字列 (継続プロンプト末尾の一部)。
+# 入力欄に継続プロンプトが居座っているか (= 未送信) を判定する部分文字列 (継続プロンプト末尾の一部)。
 CONTINUATION_RESIDUAL_MARK="言い直してから作業を継続せよ"
+# 継続プロンプト先頭の部分文字列。テキスト部分着地 (本文は着地済みだが末尾マーク未レンダリング) を
+# 「ユーザー置換」と誤判定して未送信化するのを防ぐため、入力欄に継続プロンプトが (部分的にでも) 在る
+# ことを先頭マークで検出する (code-reviewer I-1)。プロンプト冒頭で最初に描画される。
+CONTINUATION_HEAD_MARK="直前の文脈は"
 
-# residual_in_tail <capture_text> → 0(末尾3行=入力欄相当に継続プロンプト文言が残留) / 1。
-# 純関数 (capture 文字列のみに依存) でテスト容易。Claude REPL は送信済みプロンプトを画面履歴に
-# 表示するため whole-capture でなく末尾3行に限定し、正常時 (送信成功で履歴に残るだけ) の不要
-# Enter を防ぐ。
-residual_in_tail() {
-    local tail3; tail3="$(printf '%s' "${1:-}" | tail -3)"
-    [ -n "${tail3}" ] && printf '%s' "${tail3}" | grep -qF "${CONTINUATION_RESIDUAL_MARK}"
+# input_box_region <capture_text> → stdout: 最後の 2 本の水平罫線 (───) の間の行 (= 入力ボックス)。
+# Claude REPL は入力欄を ─── 罫線で上下に挟んでステータスフッターの直上に描画する。罫線が 2 本
+# 未満なら入力欄を特定できないので何も出さない (caller は「未送信でない」と扱い無限 Enter を避ける)。
+input_box_region() {
+    awk '
+        { lines[NR]=$0 }
+        /───/ { r[++n]=NR }
+        END {
+            if (n < 2) exit 0
+            lo=r[n-1]; hi=r[n]
+            for (i=lo+1; i<hi; i++) print lines[i]
+        }
+    ' <<<"${1:-}"
+}
+
+# continuation_pending <capture_text> → 0(継続プロンプトが入力欄に居座り未送信 = Enter 必要) / 1。
+# 純関数 (capture 文字列のみに依存)。堅牢性の核心:
+#  ① 入力欄領域 (input_box_region) に限定 → 送信成功後に scrollback 履歴へ echo される同一文言を
+#     「未送信」と誤認しない (whole-capture grep の誤検出を排除)。
+#  ② 入力欄テキストとマークを whitespace 正規化してから部分一致 → REPL のワードラップ (長い多バイト
+#     プロンプトの途中に改行/インデント空白を挿入) がマーク文字列を分断しても確実に一致する
+#     (旧 tail-3 + 連続 grep -qF はワードラップで破綻し再 Enter が永久に発火しなかった = 実報告バグ)。
+continuation_pending() {
+    local box; box="$(input_box_region "${1:-}")"
+    [ -n "${box}" ] || return 1
+    local nbox nmark
+    nbox="$(printf '%s' "${box}" | tr -d '[:space:]')"
+    nmark="$(printf '%s' "${CONTINUATION_RESIDUAL_MARK}" | tr -d '[:space:]')"
+    [ -n "${nmark}" ] || return 1
+    case "${nbox}" in *"${nmark}"*) return 0 ;; *) return 1 ;; esac
+}
+
+# continuation_user_appended <capture_text> → 0(入力欄にユーザーが継続プロンプトの後ろへ追記した
+#   と『積極的に』判定できた) / 1(それ以外)。
+# 目的 (Codex Critical): 圧縮直後の settle / 追加 Enter 間隔の窓でユーザーが入力欄へ自分のテキストを
+#   打ち始めた場合、Enter を撃つと『継続プロンプト + ユーザーの打ちかけ』を誤送信する。これを防ぐ。
+# 判定: 入力欄の正規化テキストが継続プロンプト末尾マーク (= プロンプトの最終文) で終わらず、マークの
+#   後ろにさらに文字が続く → ユーザー追記。マーク末尾 (句点許容) で終わる正常時は追記なし。マークが
+#   無い (送信済/空/入力欄特定不能/capture 不能) ときは『追記』と断定しない (return 1) → caller は
+#   送信を優先する (核心バグ=未送信の解消を最優先, best-effort)。Claude REPL は入力テキスト末尾に
+#   カーソル文字を描画しないため、末尾一致判定は実機で安定する (実機 capture で確認済)。
+continuation_user_appended() {
+    local box; box="$(input_box_region "${1:-}")"
+    [ -n "${box}" ] || return 1
+    local nbox nmark
+    nbox="$(printf '%s' "${box}" | tr -d '[:space:]')"
+    nmark="$(printf '%s' "${CONTINUATION_RESIDUAL_MARK}" | tr -d '[:space:]')"
+    [ -n "${nmark}" ] || return 1
+    case "${nbox}" in
+        *"${nmark}")   return 1 ;;   # マーク (プロンプト末尾) で終わる → 追記なし
+        *"${nmark}。")  return 1 ;;   # マーク + 句点で終わる → 追記なし
+        *"${nmark}"?*) return 0 ;;   # マークの後にさらに文字 → ユーザー追記 (誤送信回避)
+        *)             return 1 ;;   # マーク無し → 追記とは断定しない (送信優先)
+    esac
+}
+
+# input_box_has_user_text <capture_text> → 0(継続プロンプト投入『前』に入力欄が既に非空 = ユーザーが
+#   先行入力している) / 1(空 or 特定不能 or capture 不能)。
+# 目的 (Codex Critical 2): 圧縮直後にユーザーが入力欄へ打ち始めてから継続プロンプトを重ねて送ると
+#   『ユーザーの打ちかけ + 継続プロンプト』になり末尾はプロンプトのため continuation_user_appended では
+#   検出できない (prefix 型誤送信)。投入前に空入力欄を確認することで prefix 型を防ぐ。
+# 判定: 入力欄正規化テキストの byte 長がプロンプト記号 (❯ ≈3byte) + 余裕 (既定 8) を超える → ユーザー
+#   テキストあり。byte 長基準のためプロンプト記号やカーソル文字の版差に頑健で、空入力欄を「ユーザー
+#   テキスト」と誤判定しない (誤判定すると投入を中止し未送信になるため送信側に倒す)。入力欄特定不能 /
+#   capture 不能では非空と断定しない (return 1 → 投入を優先, best-effort)。
+# ★閾値トレードオフ (意図的): 閾値を下げれば短い先行入力 ("ok" 等) も検出できるが、グリフ + カーソル
+#   文字だけの空入力欄を「非空」と誤検出して投入を中止し『未送信』を招くリスクが増える。ユーザー原則
+#   「未送信が最悪・誤送信は次善」に従い、未送信を避ける側 (高めの閾値) に倒す。結果、長い先行入力 (実害
+#   のある composing 中メッセージ) は検出し、ごく短い先行入力 (無害な短トークンが復元指示の前に付くだけ)
+#   は許容する。
+input_box_has_user_text() {
+    local box; box="$(input_box_region "${1:-}")"
+    [ -n "${box}" ] || return 1
+    local nb
+    nb=$(printf '%s' "${box}" | tr -d '[:space:]' | wc -c)
+    [ "${nb}" -gt "${INPUT_BOX_EMPTY_MAX_BYTES:-8}" ]
+}
+
+# continuation_box_has_head <capture_text> → 0(入力欄に継続プロンプト先頭マークが在る = 我々の
+#   プロンプトが部分的にでも着地している) / 1(無い)。部分着地を「ユーザー置換」と誤判定しないため。
+continuation_box_has_head() {
+    local box; box="$(input_box_region "${1:-}")"
+    [ -n "${box}" ] || return 1
+    local nbox nhead
+    nbox="$(printf '%s' "${box}" | tr -d '[:space:]')"
+    nhead="$(printf '%s' "${CONTINUATION_HEAD_MARK}" | tr -d '[:space:]')"
+    [ -n "${nhead}" ] || return 1
+    case "${nbox}" in *"${nhead}"*) return 0 ;; *) return 1 ;; esac
+}
+
+# continuation_box_corrupted <capture_text> → 0(入力欄が『綺麗な継続プロンプトのみ』でないと積極的に
+#   判定できた = 送信すると誤送信になる) / 1(綺麗な継続プロンプト or 空 or 特定不能 or 部分着地 = 送信
+#   してよい)。初回 Enter を撃つ直前の最終ガード。誤送信の 2 形を積極検出する:
+#   - suffix: 継続プロンプト末尾の後ろにユーザー追記 (continuation_user_appended)。
+#   - replace: 入力欄に実質的なテキストがあるのに継続プロンプトの末尾マーク『も先頭マークも』含まない =
+#     ユーザーが投入後にプロンプトを消して自分のテキストに置換した。先頭マークが在れば部分着地 (我々の
+#     テキスト) であり置換でない → 汚染としない (部分着地を置換と誤判定して未送信化するのを防ぐ,
+#     code-reviewer I-1。本修正は「誤送信回避より未送信回避を優先」のユーザー原則に従う)。
+# 空入力欄 (テキスト未着地) / 入力欄特定不能 / capture 不能 は『汚染』と断定しない (return 1) → 送信を
+#   優先する (核心バグ=未送信の解消を最優先, best-effort。空入力欄への単独 Enter は no-op で無害)。
+continuation_box_corrupted() {
+    local cap="${1:-}"
+    continuation_user_appended "${cap}" && return 0   # suffix 追記
+    # replace 置換: 実テキストあり ∧ 末尾マーク無し ∧ 先頭マークも無し (部分着地でない) → ユーザー置換
+    if input_box_has_user_text "${cap}" \
+        && ! continuation_pending "${cap}" \
+        && ! continuation_box_has_head "${cap}"; then
+        return 0
+    fi
+    return 1
 }
 
 # inject <pane> <action> → 0(送出成功) / 1(失敗)。圧縮コマンド (${COMPACTION_COMMAND}, 既定 /compact)
@@ -62,11 +169,58 @@ residual_in_tail() {
 # ★圧縮コマンド本体の send-keys 成否を返す: 失敗を握り潰すと caller が compacted を誤って立て
 #   resume 待ちデッドロックになる (I2)。kick は best-effort。
 # ★大 context の圧縮リロード/要約は入力欄準備に時間がかかる: 待機を RESUME_DELAY_SECONDS で延長し、
-#   kick 後に capture-pane で継続プロンプト文言が入力欄に残留 (= Enter 取りこぼし) していれば
-#   best-effort で Enter を再確定する。
-# ★M-1: 残留判定は capture 末尾3行 (入力欄相当) に限定する。Claude REPL は送信済みプロンプトを
-#   画面履歴に表示するため、whole-capture では正常時も文言が残り不要 Enter を撃つ。さらに
-#   再 Enter 直前に pane_is_idle を再確認し、busy (ユーザー割り込み中) なら撃たない。
+#   入力欄準備 (pane idle) を poll してから継続プロンプトを送る。
+# ★継続プロンプトの自動送信 (Part B 修正の核心): 長い多バイトのプロンプト + Enter を『同一 send-keys』で
+#   送ると、REPL が連続バーストを bracketed-paste と解釈し末尾 Enter を貼り付け内の改行として吸収する
+#   → テキストだけ入力欄に残り未送信 (ユーザー実報告 / 使い捨て tmux で実機再現)。対策は 2 段:
+#     ① テキストと Enter を分離して送る (テキストのみ → settle → 単独 Enter)。単独 Enter は貼り付けの
+#        一部でないため確実に送信を起動する。
+#     ② 単発 Enter の取りこぼしに備え、入力欄 (───罫線間) に継続プロンプトが残る間 (continuation_pending)
+#        最大 RESUME_REENTER_MAX 回まで追加 Enter を撃つ。残留消失 (= 送信成功で入力欄クリア) / busy
+#        (= 送信成功で turn 進行中) / capture 不能 で停止。空入力欄への単独 Enter は no-op のため余剰
+#        Enter は無害。
+# submit_continuation_prompt <pane> → 継続プロンプトを入力欄へ投入し『送信まで』確定する。
+#   ① テキストのみ送出 (Enter を束ねない)。長い多バイトのテキスト + Enter を同一 send-keys で送ると
+#      REPL が bracketed-paste と解釈し末尾 Enter を貼り付け内の改行として吸収する → 未送信のまま
+#      入力欄に残る (実機再現)。テキストと Enter を分離し、単独 Enter (貼り付けの一部でない) で送信を起動。
+#   ① 投入前ガード (Codex Critical 2): 入力欄に既にユーザーのテキストがある (圧縮直後にユーザーが
+#      打ち始めた) 場合、その上に継続プロンプトを重ねて投入 → Enter すると『ユーザーの打ちかけ +
+#      継続プロンプト』を誤送信する (prefix 型)。空入力欄を確認できたときのみ投入する。capture 不能 /
+#      入力欄特定不能では投入を優先 (best-effort)。
+#   ② settle 後に最初の単独 Enter を送る。ただし settle 中にユーザーが入力欄へ追記したと『積極的に』
+#      判定できた (continuation_user_appended) ときだけ抑止する (suffix 型誤送信を防ぐ, Codex Critical)。
+#      capture 不能 / 入力欄特定不能では送信を優先する (核心バグ=未送信の解消が最優先, best-effort。
+#      入力欄が罫線2本未満で特定できなくても初回 Enter は必ず送られる = Codex Important 3 を満たす)。
+#   ③ 取りこぼしガード: 入力欄 (───罫線間) に継続プロンプトが残る間 (continuation_pending) 追加 Enter を
+#      最大 RESUME_REENTER_MAX 回撃つ。残留消失 (= 送信成功で入力欄クリア) / ユーザー追記検出 / busy
+#      (= 送信成功で turn 進行中) / capture 不能 で停止。空入力欄への単独 Enter は no-op のため余剰
+#      Enter は無害。
+submit_continuation_prompt() {
+    local pane="$1" cap
+    # ① 投入前ガード: 入力欄にユーザーの先行入力があれば重ね投入しない (prefix 型誤送信を防ぐ)。
+    cap="$(tmux capture-pane -t "${pane}" -p 2>/dev/null || true)"
+    if input_box_has_user_text "${cap}"; then return 0; fi
+    tmux send-keys -t "${pane}" "${CONTINUATION_PROMPT}" 2>/dev/null || true
+    sleep "${RESUME_SETTLE_SECONDS:-2}"
+    # ② 初回 Enter 前の汚染ガード (suffix 追記 / replace 置換を積極検出した時のみ抑止 → 空入力欄/
+    #    特定不能/capture 不能では送信優先 = 核心バグ=未送信の解消を最優先, Important 3 を満たす)。
+    cap="$(tmux capture-pane -t "${pane}" -p 2>/dev/null || true)"
+    if continuation_box_corrupted "${cap}"; then return 0; fi
+    # 最初の送信 Enter (確実に 1 回; 分離 Enter で核心バグ=未送信を解消)。
+    tmux send-keys -t "${pane}" Enter 2>/dev/null || true
+    local i=0
+    while [ "${i}" -lt "${RESUME_REENTER_MAX:-5}" ]; do
+        sleep "${RESUME_SUBMIT_INTERVAL:-2}"
+        cap="$(tmux capture-pane -t "${pane}" -p 2>/dev/null || true)"
+        [ -n "${cap}" ] || break                  # capture 不能 → best-effort 終了 (Enter は既に送出済)
+        continuation_pending "${cap}" || break     # 入力欄クリア = 送信成功 → 停止
+        continuation_user_appended "${cap}" && break  # ユーザー追記検出 → 誤送信回避で停止
+        pane_is_idle "${pane}" || break             # busy = 送信成功で turn 進行中 → 停止
+        tmux send-keys -t "${pane}" Enter 2>/dev/null || true
+        i=$((i+1))
+    done
+}
+
 inject() {
     local pane="$1" action="$2"
     [ -n "${pane}" ] || return 1
@@ -80,32 +234,18 @@ inject() {
                 *) printf '[cc-compaction-daemon] 無効な COMPACTION_COMMAND=[%s] → /compact に矯正\n' "${cmd}" >&2; cmd="/compact" ;;
             esac
             tmux send-keys -t "${pane}" "${cmd}" Enter 2>/dev/null || return 1
-            # ★圧縮リロード完了待ち (Part B): 大 context のリロード/要約は入力欄準備に時間がかかる。
+            # ★圧縮リロード完了待ち: 大 context のリロード/要約は入力欄準備に時間がかかる。
             #   /compact は LLM 要約のため /clear より長め。最低 RESUME_DELAY_SECONDS 待ち、その後
             #   pane idle (= 入力欄準備完了) を RESUME_MAX_WAIT_SECONDS まで poll してから継続プロンプトを
-            #   送る。固定 sleep だけでは大 context で早すぎ、プロンプト+Enter が入力欄準備前に届き
-            #   取りこぼす。timeout でも degrade で送る (送らないより送る)。
+            #   送る。固定 sleep だけでは大 context で早すぎ、テキストが入力欄準備前に届き取りこぼす。
+            #   timeout でも degrade で送る (送らないより送る)。
             sleep "${RESUME_DELAY_SECONDS:-12}"
             local waited="${RESUME_DELAY_SECONDS:-12}" maxw="${RESUME_MAX_WAIT_SECONDS:-90}"
             while [ "${waited}" -lt "${maxw}" ]; do
                 pane_is_idle "${pane}" && break
                 sleep 1; waited=$((waited+1))
             done
-            tmux send-keys -t "${pane}" "${CONTINUATION_PROMPT}" Enter 2>/dev/null || true
-            # ★Enter 取りこぼしガード (Part B): 継続プロンプトが入力欄 (末尾3行) に残留し pane が
-            #   idle の間、最大 RESUME_REENTER_MAX 回 Enter を再確定する。残留消失 (= 送信成功) /
-            #   busy で停止。capture-pane / tmux 不在は best-effort で握り潰す (break)。
-            local i=0 cap
-            while [ "${i}" -lt "${RESUME_REENTER_MAX:-3}" ]; do
-                sleep 1
-                cap="$(tmux capture-pane -t "${pane}" -p 2>/dev/null || true)"
-                if residual_in_tail "${cap}" && pane_is_idle "${pane}"; then
-                    tmux send-keys -t "${pane}" Enter 2>/dev/null || true
-                else
-                    break
-                fi
-                i=$((i+1))
-            done
+            submit_continuation_prompt "${pane}"
             return 0 ;;
     esac
     return 1
