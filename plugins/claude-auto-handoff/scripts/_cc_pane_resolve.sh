@@ -5,13 +5,17 @@
 resolve_pane_by_cwd() {
     local target="$1"
     command -v tmux >/dev/null 2>&1 || return 0
-    # cwd 一致のうち claude REPL (node/claude) ペインを優先 (I1: 同一 cwd に shell ペインが
-    # 並ぶと別ペインに /clear を誤爆するため)。command 一致が無ければ最初の cwd 一致に degrade。
+    # cwd 一致のうち claude REPL ペインを優先 (I1: 同一 cwd に shell ペインが並ぶと別ペインに
+    # /clear を誤爆するため)。command 一致が無ければ最初の cwd 一致に degrade。
+    # ★claude 判定: node/claude/claude-code に加え cc/bun ランチャ、および native installer が
+    #   #{pane_current_command} に返す versioned バイナリ (例 "2.1.161") を `^[0-9]+\.[0-9]+\.[0-9]+`
+    #   で救済する。これを欠くと native-install 構成で claude pane が version 文字列を名乗り優先されず、
+    #   先頭の非 claude pane (bash) に fallback して圧縮コマンドを誤爆 = その session が圧縮されない。
     tmux list-panes -a -F '#{pane_id} #{pane_current_path} #{pane_current_command}' 2>/dev/null \
         | awk -v t="${target}" '
             $2==t {
                 if (fb=="") fb=$1
-                if ($3 ~ /^(node|claude|claude-code)$/) { print $1; found=1; exit }
+                if ($3 ~ /^(node|claude|claude-code|cc|bun)$/ || $3 ~ /^[0-9]+\.[0-9]+\.[0-9]+/) { print $1; found=1; exit }
             }
             END { if (!found && fb!="") print fb }'
 }

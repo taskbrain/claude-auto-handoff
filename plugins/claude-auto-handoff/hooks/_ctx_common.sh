@@ -160,6 +160,12 @@ ctx_generation_stamp() { mkdir -p "$(ctx_home)" 2>/dev/null || true; : > "$(ctx_
 # ctx_handoff_after_generation <handoff_file> <sess> → 0(現世代 = 復元可) / 1(前世代 = 復元不可)。
 # generation marker が無ければ世代境界なしとみなし 0 (後方互換: 従来どおり復元)。stat 失敗時も
 # 0 (handoff を失わない側に倒す。鮮度ゲートと同方針)。
+# ★既知の境界 (dual-review nit, fix-now でない): 比較は秒粒度 mtime の `-ge` (同値=復元可)。これは
+#   「自分の fresh handoff を必ず復元する」安全側 (未送信/文脈喪失を避ける) の意図的選択で、`-gt` は
+#   同一秒に書かれた自分の handoff を under-restore し stall 側に倒れるため採らない。代償として、別
+#   セッションが同一 pane を『同一 Unix 秒』内に再利用し前占有者 handoff.mtime と新世代 gen.mtime が
+#   同秒に揃う極稀ケースで前占有者 handoff を誤復元しうる (= 文脈汚染。stall ではない)。sub-second
+#   比較や provenance 照合で塞げるが、現行 -ge は安全原則 (復元優先) と整合した妥当な選択のため維持。
 ctx_handoff_after_generation() {
     local fp="$1" sess="$2" gen hm gm
     gen="$(ctx_generation_path "${sess}")"
