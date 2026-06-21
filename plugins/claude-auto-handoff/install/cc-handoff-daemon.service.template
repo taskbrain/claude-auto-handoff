@@ -1,0 +1,17 @@
+# systemd --user unit テンプレート (参考)。
+# 通常は install/install.sh が絶対パスを解決してこの内容を ~/.config/systemd/user/ に生成する。
+# 手動で配置する場合は __PLUGIN_ROOT__ をプラグインの絶対パスに置換し、
+# ~/.config/systemd/user/cc-handoff-daemon.service に保存して:
+#   systemctl --user daemon-reload && systemctl --user enable --now cc-handoff-daemon.service
+[Unit]
+Description=claude-auto-handoff compaction daemon (monitor context % and trigger /compact with handoff restore)
+
+[Service]
+Type=simple
+Environment=CC_HANDOFF_DAEMON_ENABLED=true
+ExecStart=/usr/bin/env bash __PLUGIN_ROOT__/scripts/cc-compaction-daemon.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

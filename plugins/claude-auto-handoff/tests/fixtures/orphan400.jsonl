@@ -1,0 +1,1 @@
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"API Error: 400 due to tool use concurrency issues."}]},"error":"invalid_request","isApiErrorMessage":true}

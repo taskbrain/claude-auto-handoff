@@ -1,0 +1,14 @@
+# OS / editor
+.DS_Store
+*.swp
+*~
+
+# テスト一時生成物 (テストは mktemp を使うため通常残らないが念のため)
+/tmp/
+*.log
+
+# ローカル実行時の state (ユーザー環境の ~/.claude/auto-compaction/ 配下に作られるため
+# 本リポには入らないが、誤コミット防止に明示)
+state/
+handoffs/
+archive/

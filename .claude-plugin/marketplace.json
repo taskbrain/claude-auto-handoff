@@ -1,0 +1,15 @@
+{
+  "name": "claude-auto-handoff",
+  "owner": { "name": "TaskBrain" },
+  "metadata": {
+    "description": "Auto-compaction handoff + reliable restore for Claude Code.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "claude-auto-handoff",
+      "source": "./plugins/claude-auto-handoff",
+      "description": "Proactively writes an 8-section handoff before context compaction and re-injects it on SessionStart, so /compact (or /clear) never loses your working context."
+    }
+  ]
+}

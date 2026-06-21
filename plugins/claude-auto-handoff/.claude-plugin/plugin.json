@@ -1,0 +1,9 @@
+{
+  "name": "claude-auto-handoff",
+  "description": "Auto-compaction handoff + reliable restore for Claude Code. Proactively writes an 8-section handoff before the context is compacted and re-injects it on SessionStart, so /compact (or /clear) never loses your working context — no manual copy-paste.",
+  "version": "1.0.0",
+  "author": { "name": "TaskBrain" },
+  "homepage": "https://github.com/TaskBrain/claude-auto-handoff",
+  "repository": "https://github.com/TaskBrain/claude-auto-handoff",
+  "license": "MIT"
+}
