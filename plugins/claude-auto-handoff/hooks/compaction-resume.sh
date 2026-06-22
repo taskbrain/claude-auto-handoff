@@ -99,9 +99,14 @@ HAVE_BODY=0
 #   を消すか DISABLED。実運用は /clear して復元を期待するため復元側に倒す)。鮮度ゲート
 #   (ctx_file_has_fresh_text) と pane 再利用ガード (startup/resume の episode_reset) が誤復元を防ぐ。
 if [ -n "${HF}" ]; then
-python3 - "${HF}" <<'PY' 2>/dev/null || true
+# ★P1b: NEXT STEPS 節が薄い handoff は復帰後の最初の turn が漠然となりやすい。薄さを検出して
+#   additionalContext に補強ガイダンスを足す (warn-only、復元も圧縮も止めない純テキスト)。
+NS_THIN=0
+ctx_handoff_next_steps_thin "${HF}" && NS_THIN=1
+python3 - "${HF}" "${NS_THIN}" <<'PY' 2>/dev/null || true
 import json,sys
 body=open(sys.argv[1],errors="replace").read()
+thin=(len(sys.argv) > 2 and sys.argv[2] == "1")
 goal=""
 lines=body.splitlines()
 for i,l in enumerate(lines):
@@ -110,12 +115,16 @@ for i,l in enumerate(lines):
             if lines[j].strip():
                 goal=lines[j].strip(); break
         break
-ctx=("[auto-compaction 復帰] 直前にこのセッションは自動コンパクションで /clear された。"
+thin_note=("\n[⚠️ NEXT STEPS 補強] このハンドオフの NEXT STEPS 節が薄い。STATE と OPEN FILES & REFS から"
+           "具体的な次の一手を自分で再構築してから着手せよ (続行プロンプトの汎用指示に頼らない)。"
+           if thin else "")
+ctx=("[auto-compaction 復帰] 直前にこのセッションは自動的にコンパクション (/compact 要約 または /clear) された。"
      "下記は圧縮直前に保全された詳細ハンドオフ (あなた自身またはバックストップが作成)。"
      "これを唯一の信頼できる文脈源として、再実行でなく『続き』を実行せよ。\n\n"
      + body +
      "\n\n---\n[RESUME 手順] ① このハンドオフを読了 → ② 現在地を 3-5 文で言い直す "
      "→ ③ NEXT STEPS の先頭(次の一手)を確認 → ④ TEST STATE の smoke を実行してから着手。"
+     + thin_note
      + ("\n[REMINDER] 最優先ゴール: " + goal if goal else ""))
 print(json.dumps({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":ctx}}, ensure_ascii=False))
 PY

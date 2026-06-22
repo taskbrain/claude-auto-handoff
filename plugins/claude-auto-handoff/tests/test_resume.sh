@@ -164,5 +164,54 @@ printf '# HANDOFF model\n## 1. CURRENT GOAL\nNONBLANK_GOAL\n' > "${TMP}/handoffs
 OUT="$(printf '{"source":"clear","cwd":"/x"}' | bash "${H}")"
 assert_contains "${OUT}" "NONBLANK_GOAL" "本文ある model.md → 通常通り再注入 (空扱いしない)"
 
+# --- P1b: NEXT STEPS 薄さ警告 (Stage3 additionalContext, warn-only) ----------
+# model.md の NEXT STEPS 節が薄い (具体的な次の一手が無い) と、復帰後の最初の turn が漠然となる。
+# ctx_handoff_next_steps_thin で薄さを検出し additionalContext に補強ガイダンスを追加する。
+# ★圧縮は止めない (純テキスト注入、stall risk ゼロ)。見出し不在/ファイル不在は薄いと断定しない。
+NS_MARK="NEXT STEPS 補強"
+
+# 17) ヘルパ単体: 薄い NEXT STEPS (短い1行) → thin(0)
+TMP="$(mktemp -d)"; export CC_COMPACTION_HOME="${TMP}"; mkdir -p "${TMP}/handoffs"
+printf '## 2. STATE\nいろいろ詳細な状態がここに書かれている長い本文。\n## 3. NEXT STEPS\n1. 続き\n## 4. OPEN FILES\n/x/y\n' > "${TMP}/thin.md"
+assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/thin.md" && echo THIN || echo OK)" "THIN" "P1b: 短い NEXT STEPS → thin"
+# 18) ヘルパ単体: 十分な NEXT STEPS (長い本文) → not thin(1)
+printf '## 3. NEXT STEPS\n1. まず対象ファイルを読み込んで現在の状態を把握する\n2. 次に実装を進めてテストを通す\n3. 最後に全体を確認してレビューに出す\n## 4. OPEN FILES\n' > "${TMP}/fat.md"
+assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/fat.md" && echo THIN || echo OK)" "OK" "P1b: 十分な NEXT STEPS → not thin"
+# 19) ヘルパ単体: NEXT STEPS 見出し不在 → 薄いと断定しない (not thin)
+printf '## 1. CURRENT GOAL\nやること\n## 2. STATE\n状態\n' > "${TMP}/noheading.md"
+assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/noheading.md" && echo THIN || echo OK)" "OK" "P1b: 見出し不在 → 薄いと断定しない (誤警告回避)"
+# 20) ヘルパ単体: ファイル不在 → not thin
+assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/nope.md" && echo THIN || echo OK)" "OK" "P1b: ファイル不在 → 薄いと断定しない"
+# 21) ヘルパ単体: 番号付きリストは本文として数える (見出し境界は #/罫線のみ → リストで切らない)
+printf '## 3. NEXT STEPS\n1. 最初のステップでまず対象ファイルを読み込んで状態を把握する\n2. 次のステップで実装を進めてテストを通す\n3. 最後に全体を確認してレビューに出す\n## 4. X\n' > "${TMP}/listy.md"
+assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/listy.md" && echo THIN || echo OK)" "OK" "P1b: 番号付きリストは本文として数える (1. で切らない)"
+# 22) ヘルパ単体: min_chars 引数で閾値を上書きできる
+assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/fat.md" 99999 && echo THIN || echo OK)" "THIN" "P1b: min_chars 引数で閾値上書き (大きすれば thin 判定)"
+# 22b) 散文で 'NEXT STEPS' に言及しても見出し行のみを見出しと認識し実節 (充実) を測る (false THIN を出さない)
+printf '## 2. STATE\nここで状態を説明する。詳細は後述の NEXT STEPS 節を参照すること。\n## 3. NEXT STEPS\n1. まず対象を読み込んで状態を把握する\n2. 実装してテストを通す\n3. レビューに出す\n## 4. X\n' > "${TMP}/prose.md"
+assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/prose.md" && echo THIN || echo OK)" "OK" "P1b minor: 散文の 'NEXT STEPS' 言及を見出し誤認しない"
+# 22c) 散文言及のみ (実見出し無し) → 薄いと断定しない (not thin)
+printf '## 1. GOAL\nやること\n## 2. STATE\n後で NEXT STEPS を埋める予定。\n' > "${TMP}/prose_only.md"
+assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/prose_only.md" && echo THIN || echo OK)" "OK" "P1b minor: 散文言及のみ (実見出し無し) → 薄いと断定しない"
+# 22d) 非数値 min_chars (誤設定) → 安全側 (not thin = 警告抑制)
+assert_eq "$(NEXT_STEPS_MIN_CHARS=abc ctx_handoff_next_steps_thin "${TMP}/thin.md" && echo THIN || echo OK)" "OK" "P1b minor: 非数値 NEXT_STEPS_MIN_CHARS → not thin (安全側)"
+
+# 23) 統合: 薄い NEXT STEPS の handoff + source=clear → additionalContext に補強ガイダンス
+TMP="$(mktemp -d)"; export CC_COMPACTION_HOME="${TMP}"; mkdir -p "${TMP}/handoffs"
+printf '# HANDOFF\n## 1. CURRENT GOAL\nTHIN_NS_GOAL\n## 3. NEXT STEPS\n1. 続き\n## 4. OPEN FILES\n/x\n' > "${TMP}/handoffs/${SESS}.model.md"
+: > "${TMP}/.compacted_${SESS}"
+OUT="$(printf '{"source":"clear","cwd":"/x"}' | bash "${H}")"
+assert_contains "${OUT}" "THIN_NS_GOAL" "P1b統合: 本文は再注入される"
+assert_contains "${OUT}" "${NS_MARK}" "P1b統合: 薄い NEXT STEPS → 補強ガイダンスを additionalContext に追加"
+
+# 24) 統合: 十分な NEXT STEPS の handoff → 補強ガイダンスは出さない (境界固定)
+TMP="$(mktemp -d)"; export CC_COMPACTION_HOME="${TMP}"; mkdir -p "${TMP}/handoffs"
+printf '# HANDOFF\n## 1. CURRENT GOAL\nFAT_NS_GOAL\n## 3. NEXT STEPS\n1. まず実装してテストを通す\n2. 次にレビューに出す\n3. 最後にドキュメントを更新する\n## 4. OPEN FILES\n' > "${TMP}/handoffs/${SESS}.model.md"
+: > "${TMP}/.compacted_${SESS}"
+OUT="$(printf '{"source":"clear","cwd":"/x"}' | bash "${H}")"
+assert_contains "${OUT}" "FAT_NS_GOAL" "P1b統合: 本文は再注入される (十分ケース)"
+NEG="$(printf '%s' "${OUT}" | grep -cF "${NS_MARK}" || true)"
+assert_eq "${NEG}" "0" "P1b統合: 十分な NEXT STEPS → 補強ガイダンスを出さない"
+
 rm -rf "${TMP}"
 report

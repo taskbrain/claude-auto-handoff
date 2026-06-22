@@ -131,6 +131,43 @@ ctx_file_has_fresh_text() {
     [ $((now - m)) -le "${max}" ]
 }
 
+# ctx_handoff_next_steps_thin <handoff_file> [min_chars] → 0(NEXT STEPS 節が薄い = 追加ガイダンス対象) /
+#   1(十分 / 見出し不在 / ファイル不在)。Stage3 復元 (compaction-resume) が、NEXT STEPS が薄い handoff
+#   で復帰後の最初の turn が漠然となるのを防ぐ補強ガイダンス材料。★warn-only: 圧縮も復元も止めない
+#   純テキスト判定 (副作用なし・stall risk ゼロ)。閾値 conf: NEXT_STEPS_MIN_CHARS (既定 40)。
+ctx_handoff_next_steps_thin() {
+    local fp="$1" minchars="${2:-${NEXT_STEPS_MIN_CHARS:-40}}"
+    [ -f "${fp}" ] || return 1
+    NS_MIN="${minchars}" python3 - "${fp}" <<'PY' 2>/dev/null
+import os, re, sys
+ns_raw = os.environ.get("NS_MIN", "40")
+if not ns_raw.lstrip("+-").isdigit():
+    sys.exit(1)
+minc = int(ns_raw)
+try:
+    lines = open(sys.argv[1], errors="replace").read().splitlines()
+except OSError:
+    sys.exit(1)
+head_like = re.compile(r'^\s*(#{1,6}\s|\d+\s*[.)]\s)')
+start = None
+for i, l in enumerate(lines):
+    if "NEXT STEPS" in l.upper() and head_like.match(l):
+        start = i + 1
+        break
+if start is None:
+    sys.exit(1)
+hdr = re.compile(r'^\s*(#{1,6}\s|-{3,}\s*$|={3,}\s*$)')
+body = []
+for l in lines[start:]:
+    if hdr.match(l):
+        break
+    body.append(l)
+text = "".join("".join(body).split())
+sys.exit(0 if len(text) < minc else 1)
+PY
+}
+
+
 # --- 2段 cadence 状態フラグ (マーカーファイル) ---------------------------------
 # フラグ実体は ctx_home()/.<name>_<sess>。set/clear/isset の最小 API。
 ctx_flag_path()  { printf '%s' "$(ctx_home)/.${1}_${2}"; }

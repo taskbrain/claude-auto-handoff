@@ -154,5 +154,33 @@ T="$(mktemp -d)"; export CC_COMPACTION_HOME="${T}"; mk "${T}" critical model
 assert_contains "$(run "${T}" "${EMPTYBOX}")" "/compact" "I1: 空入力欄 → defer せず /compact"
 assert_eq "$([ -e "${T}/.compact_defer_wt-a" ] && echo SET || echo UNSET)" "UNSET" "I1: 空入力欄 → defer counter 付かない"
 
+# === P1-400: orphan-400 brick の回復は model.md 非空ゲートを bypass する (tick 統合) =============
+# orphan-400 (#40305) は heavy tool 使用中 (prepare 帯 50% 到達前) にも起こりうる。一度 brick すると
+# 全 turn が 400 を返すためモデルが model.md を自筆できない。tick の model.md 非空ゲートを
+# COMPACT_RECOVER にも課すと /clear が永久に送られず恒久 stall になる。COMPACT_RECOVER (400 検出) だけ
+# gate を bypass し /clear を送ることを end-to-end で固定する。tick は transcript を
+# $HOME/.claude/projects/<cwd slug>/*.jsonl から探す。
+# 18b) 400 brick + model.md 不在 → COMPACT_RECOVER が gate を bypass し /clear 送出
+T="$(mktemp -d)"; export CC_COMPACTION_HOME="${T}"; mk "${T}" critical
+FAKEHOME="$(mktemp -d)"; mkdir -p "${FAKEHOME}/.claude/projects/-x"
+printf '%s\n' '{"isApiErrorMessage":true,"text":"API Error: 400 oops"}' > "${FAKEHOME}/.claude/projects/-x/t.jsonl"
+export TMUX_LOG="${T}/inject.log"; : > "${TMUX_LOG}"
+OUT400="$(COOLDOWN_SECONDS=0 CAP='idle prompt >' SENDFAIL=0 PANE_IDS='%9' HOME="${FAKEHOME}" \
+    RESUME_DELAY_SECONDS=0 RESUME_MAX_WAIT_SECONDS=0 RESUME_REENTER_MAX=0 RESUME_SETTLE_SECONDS=0 RESUME_SUBMIT_INTERVAL=0 \
+    PATH="${TMOCK}:${PATH}" bash "${DAEMON}" --once; cat "${TMUX_LOG}")"
+assert_contains "${OUT400}" "/clear" "P1-400: 400 brick + model.md 不在 → COMPACT_RECOVER が model.md ゲートを bypass し /clear 送出 (恒久 stall 回避)"
+assert_eq "$(printf '%s' "${OUT400}" | grep -cF '/compact')" "0" "P1-400: brick 回復は /clear のみ (/compact 不送出)"
+rm -rf "${FAKEHOME}"
+# 18c) [境界固定] 通常 COMPACT (critical band, 400 無し) + model.md 不在 → 従来どおり gate で stop (非回帰)
+T="$(mktemp -d)"; export CC_COMPACTION_HOME="${T}"; mk "${T}" critical
+FAKEHOME="$(mktemp -d)"; mkdir -p "${FAKEHOME}/.claude/projects/-x"
+printf '%s\n' '{"text":"normal line, no error"}' > "${FAKEHOME}/.claude/projects/-x/t.jsonl"
+export TMUX_LOG="${T}/inject.log"; : > "${TMUX_LOG}"
+OUTNO="$(COOLDOWN_SECONDS=0 CAP='idle prompt >' SENDFAIL=0 PANE_IDS='%9' HOME="${FAKEHOME}" \
+    RESUME_DELAY_SECONDS=0 RESUME_MAX_WAIT_SECONDS=0 RESUME_REENTER_MAX=0 RESUME_SETTLE_SECONDS=0 RESUME_SUBMIT_INTERVAL=0 \
+    PATH="${TMOCK}:${PATH}" bash "${DAEMON}" --once; cat "${TMUX_LOG}")"
+assert_eq "${OUTNO}" "" "P1-400 境界: 通常 COMPACT (400無し) + model.md 不在 → gate で stop (COMPACT には gate 維持・非回帰)"
+rm -rf "${FAKEHOME}"
+
 rm -rf "${TMOCK}" "${T}"
 report

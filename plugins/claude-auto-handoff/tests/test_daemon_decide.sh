@@ -10,8 +10,12 @@ assert_eq "$(decide_action prepare 1 "${EMPTY}")"  "NONE"    "prepare 帯は dae
 assert_eq "$(decide_action compact 0 "${EMPTY}")"  "NONE"    "compact ∧ 未prepared → 待機 (work 喪失防止)"
 assert_eq "$(decide_action compact 1 "${EMPTY}")"  "COMPACT" "compact ∧ prepared → 圧縮 (本線)"
 assert_eq "$(decide_action critical 0 "${EMPTY}")" "COMPACT" "critical → 圧縮 (prepared 不問の安全弁)"
-# 400 orphan 署名は band/prepared に関わらず COMPACT
-assert_eq "$(decide_action compact 0 "${HERE}/fixtures/orphan400.jsonl")" "COMPACT" "400署名→圧縮"
+# 400 orphan 署名は band/prepared に関わらず COMPACT_RECOVER (回復経路)。
+# ★orphan-400 (#40305) は in-place /compact では復旧不能 (要約 API 呼出自体が壊れた tool_result で
+#   400 になり /compact 再送でも回復しない = 400→/compact→400 の stall ループ)。/clear のみが壊れた
+#   履歴を捨てて確実に回復するため、回復経路は通常圧縮 (COMPACT) と区別し COMPACT_RECOVER を返す
+#   (inject 側が COMPACTION_COMMAND に依らず /clear を強制する)。
+assert_eq "$(decide_action compact 0 "${HERE}/fixtures/orphan400.jsonl")" "COMPACT_RECOVER" "400署名→COMPACT_RECOVER (orphan-400は/clear一択 #40305)"
 
 # === #3: 400署名 line-count filter ===
 # has_400_signature <tr> [sess]: sess 指定時、同一 transcript の『記録行数以降』のみで判定。ただし旧400抑止は

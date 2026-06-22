@@ -60,7 +60,7 @@ has_400_signature() {
 #  - それ以外 (idle/prepare/compact-未prepared) → NONE
 decide_action() {
     local band="$1" prepared="${2:-0}" tr="${3:-}" sess="${4:-}"
-    if has_400_signature "${tr}" "${sess}"; then echo "COMPACT"; return; fi
+    if has_400_signature "${tr}" "${sess}"; then echo "COMPACT_RECOVER"; return; fi
     case "${band}" in
         critical) echo "COMPACT" ;;
         compact)  [ "${prepared}" = "1" ] && echo "COMPACT" || echo "NONE" ;;
@@ -251,14 +251,23 @@ inject() {
     local pane="$1" action="$2"
     [ -n "${pane}" ] || return 1
     case "${action}" in
-        COMPACT)
-            # ★COMPACTION_COMMAND の値検証: ライブ pane に不正文字列 (typo/誤設定) を送ると
-            #   prompt として解釈され誤作動しうる。許容は /compact|/clear のみ、それ以外は /compact に矯正。
-            local cmd="${COMPACTION_COMMAND:-/compact}"
-            case "${cmd}" in
-                /compact|/clear) ;;
-                *) printf '[cc-compaction-daemon] 無効な COMPACTION_COMMAND=[%s] → /compact に矯正\n' "${cmd}" >&2; cmd="/compact" ;;
-            esac
+        COMPACT|COMPACT_RECOVER)
+            local cmd
+            if [ "${action}" = "COMPACT_RECOVER" ]; then
+                # ★orphan-400 (#40305) 回復: COMPACTION_COMMAND に依らず /clear を強制する。in-place
+                #   /compact は壊れた tool_result の要約 API 呼出自体が 400 になり再送でも回復しない
+                #   (400→/compact→400 の stall ループ)。/clear のみが壊れた履歴を捨てて確実に回復し、
+                #   復元は compaction-resume が handoff (model.md 非空ゲートは tick 側) から行う。
+                cmd="/clear"
+            else
+                # ★COMPACTION_COMMAND の値検証: ライブ pane に不正文字列 (typo/誤設定) を送ると
+                #   prompt として解釈され誤作動しうる。許容は /compact|/clear のみ、それ以外は /compact に矯正。
+                cmd="${COMPACTION_COMMAND:-/compact}"
+                case "${cmd}" in
+                    /compact|/clear) ;;
+                    *) printf '[cc-compaction-daemon] 無効な COMPACTION_COMMAND=[%s] → /compact に矯正\n' "${cmd}" >&2; cmd="/compact" ;;
+                esac
+            fi
             # ★圧縮コマンドを『slash command として』確実に実行させるため、送出直前に入力欄を clear する。
             #   idle pane でも未送信の下書き (ユーザー入力 / 取りこぼした残留) が入力欄に在ると、続く
             #   "${cmd}" が下書き末尾に連結され prompt として誤送信され圧縮が不発になる (Codex I1/C2)。
@@ -325,7 +334,7 @@ tick() {
         #   せず context 保持。薄い復元で文脈喪失するより安全側)。
         # ★空白/改行のみ model.md を「準備済」と誤認しない (resume の ctx_file_has_text 判定と統一)。
         #   [ -s ] (サイズ>0) だと whitespace-only でも圧縮し、resume 側は空扱い→ fallback で文脈喪失。
-        if ! ctx_file_has_text "$(ctx_handoff_dir)/${sess}.model.md"; then
+        if [ "${action}" != "COMPACT_RECOVER" ] && ! ctx_file_has_text "$(ctx_handoff_dir)/${sess}.model.md"; then
             continue
         fi
         # cooldown

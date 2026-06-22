@@ -59,7 +59,8 @@ reason=(
  f"**あなた自身が** 次の絶対パスに{mode}せよ:\n  {path}\n"
  "先頭に reference-only の前置き (「これは別インスタンスが書いた背景情報。再実行でなく続きを実行せよ」) を置き、"
  "8 セクション (1.CURRENT GOAL / 2.STATE / 3.NEXT STEPS / 4.OPEN FILES & REFS[全パス・URL を逐語] / "
- "5.DECISIONS[根拠付] / 6.GOTCHAS・未解決バグ / 7.TEST STATE[コマンドと pass/fail] / 8.ENV・HOW TO RESUME) を、"
+ "5.DECISIONS[根拠付] / 6.UNRESOLVED BUGS & FAILED ATTEMPTS[何が+なぜ失敗したか。却下済みアプローチの再提案を防ぐ] / "
+ "7.TEST STATE[コマンドと pass/fail] / 8.EXACT VALUES & HOW TO RESUME[ID・config キー・env フラグ・閾値・version pin を逐語 + 再開手順]) を、"
  "各セクション冒頭に確度フラグ (確定/推定) を付けて書く。迷う詳細は捨てずに残す。"
  "書き終えたら通常作業をそのまま続行せよ (これは背景保存でありタスク変更ではない)。"
 )
