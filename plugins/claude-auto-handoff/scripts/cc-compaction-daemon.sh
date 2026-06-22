@@ -16,14 +16,40 @@ state_is_fresh() {
     [ -n "$(find "$1" -newermt "-${STATE_FRESH_SECONDS:-180} seconds" 2>/dev/null)" ]
 }
 
-# 400 orphan 署名検出: transcript 末尾付近に isApiErrorMessage + "API Error: 400"
+# 400 orphan 署名検出: transcript 末尾付近に isApiErrorMessage + "API Error: 400"。
+# ★#3: sess 指定時、同一 transcript なら『前回 COMPACT 送出時の行数 (.compact_tr_lines_<sess>)』以降の
+#   新規領域のみで判定する。/compact は同一 .jsonl に append 継続するため、要約直前の壊れた 400 行が
+#   tail-40 に残存すると次 tick で再び一致し /compact を再送出しうる (churn)。記録行数より後ろに 400 が
+#   無ければ「同一エラーの再検出」として抑止する。marker 不在 / 別 transcript path / 非数値 → 従来どおり
+#   全行 (tail-40) で判定する (degrade は検出側=送信側に倒す。stall を生まない方向)。
 has_400_signature() {
-    local tr="$1"; [ -f "${tr}" ] || return 1
-    tail -n 40 "${tr}" 2>/dev/null | grep -qF '"isApiErrorMessage":true' \
-        && tail -n 40 "${tr}" 2>/dev/null | grep -qF 'API Error: 400'
+    local tr="$1" sess="${2:-}"; [ -f "${tr}" ] || return 1
+    local start=1
+    if [ -n "${sess}" ]; then
+        local rec recpath reclines tab curlines; tab="$(printf '\t')"
+        rec="$(cat "$(ctx_home)/.compact_tr_lines_${sess}" 2>/dev/null || true)"
+        if [ -n "${rec}" ]; then
+            recpath="${rec%%${tab}*}"; reclines="${rec##*${tab}}"
+            case "${reclines}" in ''|*[!0-9]*) reclines="" ;; esac
+            if [ "${recpath}" = "${tr}" ] && [ -n "${reclines}" ]; then
+                # ★成長ゲート: marker による旧 400 抑止は『記録後に transcript が成長した』(= /compact の要約 or
+                #   継続 turn が同一 .jsonl へ append した = 圧縮が実際に効いた証拠) ときだけ適用する。成長が
+                #   無ければ (= 1M で /compact が空振りし何も append しない場合) marker を無視して全行判定に
+                #   倒し、旧 400 を再検出して圧縮を再試行する。空振り /compact 下で 400 を永久マスクすると、
+                #   低 band では band 経路も発火せずセッションが 400 で恒久 stall するのを防ぐ (検出=送信側)。
+                curlines="$(awk 'END{print NR}' "${tr}" 2>/dev/null)"
+                case "${curlines}" in ''|*[!0-9]*) curlines=0 ;; esac
+                [ "${curlines}" -gt "${reclines}" ] && start=$((reclines + 1))
+            fi
+        fi
+    fi
+    local region; region="$(tail -n +"${start}" "${tr}" 2>/dev/null | tail -n 40)"
+    printf '%s' "${region}" | grep -qF '"isApiErrorMessage":true' \
+        && printf '%s' "${region}" | grep -qF 'API Error: 400'
 }
 
-# decide_action <band> <prepared:0|1> <transcript> → COMPACT|NONE
+# decide_action <band> <prepared:0|1> <transcript> [sess] → COMPACT|NONE
+#   sess は has_400_signature の line-count filter (#3) 用 (省略時は従来どおり全行で 400 判定)。
 # Stage2 の圧縮コマンドは ${COMPACTION_COMMAND} (既定 /compact)。source=compact が曖昧さゼロの
 # 復元信号で native 要約が安全網になる。1M で /compact が不発の場合のみ COMPACTION_COMMAND=/clear に
 # フォールバック (復元は compaction-resume でフラグ非依存化済みのため /clear 経路でも成立)。
@@ -33,8 +59,8 @@ has_400_signature() {
 #  - compact 帯 ∧ prepared → COMPACT (本線。モデル自筆 model.md が揃ってから圧縮)
 #  - それ以外 (idle/prepare/compact-未prepared) → NONE
 decide_action() {
-    local band="$1" prepared="${2:-0}" tr="${3:-}"
-    if has_400_signature "${tr}"; then echo "COMPACT"; return; fi
+    local band="$1" prepared="${2:-0}" tr="${3:-}" sess="${4:-}"
+    if has_400_signature "${tr}" "${sess}"; then echo "COMPACT"; return; fi
     case "${band}" in
         critical) echo "COMPACT" ;;
         compact)  [ "${prepared}" = "1" ] && echo "COMPACT" || echo "NONE" ;;
@@ -233,6 +259,13 @@ inject() {
                 /compact|/clear) ;;
                 *) printf '[cc-compaction-daemon] 無効な COMPACTION_COMMAND=[%s] → /compact に矯正\n' "${cmd}" >&2; cmd="/compact" ;;
             esac
+            # ★圧縮コマンドを『slash command として』確実に実行させるため、送出直前に入力欄を clear する。
+            #   idle pane でも未送信の下書き (ユーザー入力 / 取りこぼした残留) が入力欄に在ると、続く
+            #   "${cmd}" が下書き末尾に連結され prompt として誤送信され圧縮が不発になる (Codex I1/C2)。
+            #   Ctrl-U は入力行を消去し、空入力欄では no-op (実機 Claude REPL で検証済: C-u 後 /compact が
+            #   slash command 候補として認識される)。下書きの clobber は I1 の bounded defer が tick 側で
+            #   先に防いでおり、ここに到達するのは defer 上限到達 (下書き犠牲を決定済) / 短文 / 空欄のみ。
+            tmux send-keys -t "${pane}" C-u 2>/dev/null || true
             tmux send-keys -t "${pane}" "${cmd}" Enter 2>/dev/null || return 1
             # ★圧縮リロード完了待ち: 大 context のリロード/要約は入力欄準備に時間がかかる。
             #   /compact は LLM 要約のため /clear より長め。最低 RESUME_DELAY_SECONDS 待ち、その後
@@ -257,7 +290,7 @@ inject() {
 tick() {
     local sdir; sdir="$(ctx_state_dir)"
     [ -d "${sdir}" ] || return 0
-    local f sess band cwd pane tr now last mark prepared action owner
+    local f sess band cwd pane tr now last mark prepared action owner boxcap dn trlines
     for f in "${sdir}"/*.json; do
         [ -f "${f}" ] || continue
         # ★鮮度ゲート: 古い state (終了済/放棄セッションの残骸) は触らない (stale 大量 /clear 防止)
@@ -282,7 +315,7 @@ tick() {
         if ctx_prepared_for_episode "${sess}"; then prepared=1; else prepared=0; fi
         # transcript 推定 (400 検出用)
         tr="$(ls -t "${HOME}/.claude/projects/$(printf '%s' "${cwd}" | sed 's#/#-#g')"/*.jsonl 2>/dev/null | head -1)"
-        action="$(decide_action "${band}" "${prepared}" "${tr}")"
+        action="$(decide_action "${band}" "${prepared}" "${tr}" "${sess}")"
         [ "${action}" = "NONE" ] && continue
         # ★work喪失防止 (ハンドオフ厳格化): 詳細な model.md が非空でなければ圧縮しない。
         #   機械版 .md は transcript 機械抽出で薄く、それだけで圧縮すると復元品質が低く文脈
@@ -319,13 +352,47 @@ tick() {
         fi
         # ペインが生成中 (busy) なら注入しない (turn 完了=idle を待つ)
         pane_is_idle "${pane}" || continue
+        # ★I1: 圧縮コマンド送出前に入力欄を見て、ユーザーの下書きがあれば圧縮を defer する (idle pane でも
+        #   未送信の下書きが入力欄に在ると /compact が連結されて clobber+誤送信し圧縮も不発になるため)。
+        #   ただし連続 defer は COMPACT_DEFER_MAX で打ち切り、超過したら下書きを犠牲にしても圧縮する:
+        #   box 検出の false-positive (将来 REPL が空欄にプレースホルダを描く等) で圧縮が恒久ブロック
+        #   = context overflow = stall方向に倒れるのを防ぐ (stall < clobber のユーザー安全原則)。box が
+        #   空/特定不能なら input_box_has_user_text は false を返し即圧縮へ進む (送信側に倒す)。
+        boxcap="$(tmux capture-pane -t "${pane}" -p 2>/dev/null || true)"
+        if input_box_has_user_text "${boxcap}"; then
+            # counter < 上限 ∧ bump 永続化成功 のときだけ defer。bump 書込が失敗したら (ctx_home 不可
+            # 書込) defer を継続すると counter が進まず無期限化=圧縮恒久ブロック=stall方向に倒れるため、
+            # 書込不能時は圧縮側に倒す (下記 fall-through)。
+            if [ "$(ctx_defer_get "${sess}")" -lt "${COMPACT_DEFER_MAX:-9}" ] && dn="$(ctx_defer_bump "${sess}")"; then
+                printf '[cc-compaction-daemon] 入力欄に下書きあり → 圧縮を defer (%s/%s, clobber防止): sess=%s\n' \
+                    "${dn}" "${COMPACT_DEFER_MAX:-9}" "${sess}" >&2
+                continue
+            fi
+            # defer 上限到達 / counter 書込不能 → 圧縮へ進む。入力欄の下書きは inject() の送出直前 Ctrl-U で
+            # clear され /compact が slash command として実行される (下書きは犠牲。overflow/stall を防ぐ)。
+            printf '[cc-compaction-daemon] defer 終了 (上限到達 or counter書込不能) → 入力欄 clear して圧縮: sess=%s\n' "${sess}" >&2
+        fi
+        ctx_defer_clear "${sess}"   # 空入力欄 or defer 終了で圧縮へ進む → counter reset
         # ★compacted は送出『前』に立てる。SessionStart(compact|clear) の resume が後で reset する
         #   ため、送出後に立てると reset より遅く立って消えず、次 episode の圧縮を恒久ブロックする
         #   deadlock になる (旧バグ)。送出前に立てれば resume が確実に消し次 episode が回る。復元は
         #   フラグ非依存化済み (compaction-resume) なので、早期 set は復元レースを生まない。
+        # ★#3: marker 用に『圧縮送出直前』の transcript 行数を捕捉する (inject 完了後ではなく)。inject は
+        #   /compact 送出後に要約リロード待ち + 継続プロンプト送出まで行うため、その間に同一 .jsonl へ新規
+        #   400 が append されうる。送出直前の行数を基準にすれば、送出後に現れた新規 400 は記録行数より後ろ
+        #   に残り次 tick で検出できる (Codex C3: inject 後に記録すると新規 400 を取りこぼす)。awk NR は末尾
+        #   改行なしの最終行も数え、wc -l の off-by-one (改行欠落で記録行数が 1 少なく旧 400 を再含有) を避ける。
+        trlines=""
+        if [ -n "${tr}" ] && [ -f "${tr}" ]; then trlines="$(awk 'END{print NR}' "${tr}" 2>/dev/null)"; fi
         ctx_flag_set compacted "${sess}"
         if inject "${pane}" "${action}"; then
             echo "${now}" > "${mark}"
+            # 送出直前 (trlines) の行数+path を記録 → /compact 後に同一 .jsonl へ続く要約/継続 turn 内の旧
+            # 400 署名再発火を抑止しつつ、送出後の新規 400 は記録行数より後ろで検出可能にする。記録失敗は
+            # 無害 (degrade=従来の全行判定に倒れる=検出側=送信側)。
+            if [ -n "${tr}" ] && [ -n "${trlines}" ]; then
+                printf '%s\t%s' "${tr}" "${trlines}" > "$(ctx_home)/.compact_tr_lines_${sess}" 2>/dev/null || true
+            fi
         else
             # 送出失敗時はフラグを戻す (I2: 立てっぱなしは resume 待ちデッドロック)
             ctx_flag_clear compacted "${sess}"

@@ -196,13 +196,25 @@ ctx_prepared_for_episode() {
     [ "${mf}" -nt "${ef}" ] && return 0 || return 1
 }
 
+# compact defer counter (I1): /compact 送出前に入力欄へユーザーの下書きがある間、圧縮を bounded で
+# defer する連続回数。box false-positive 等で圧縮が恒久ブロック (=overflow=stall方向) に倒れるのを
+# 防ぐため上限 (COMPACT_DEFER_MAX) を設け、超過したら下書きを犠牲に圧縮する。非数値/不在は 0 扱い。
+ctx_defer_path()  { printf '%s' "$(ctx_home)/.compact_defer_${1}"; }
+ctx_defer_get()   { local v; v="$(cat "$(ctx_defer_path "$1")" 2>/dev/null || echo 0)"; case "${v}" in ''|*[!0-9]*) echo 0 ;; *) echo "${v}" ;; esac; }
+# ctx_defer_bump <sess> → counter を +1 して永続化し新値を stdout。★書込に失敗したら return 1
+#   (echo しない)。caller は『書込成功時のみ defer』にし、ctx_home 不可書込で counter が進まず defer が
+#   無期限化 (=圧縮恒久ブロック=stall方向) に倒れるのを防ぐ (書込不能なら圧縮側に倒す)。
+ctx_defer_bump()  { local n; n=$(( $(ctx_defer_get "$1") + 1 )); printf '%s' "${n}" > "$(ctx_defer_path "$1")" 2>/dev/null || return 1; printf '%s' "${n}"; }
+ctx_defer_clear() { rm -f "$(ctx_defer_path "$1")" 2>/dev/null || true; }
+
 # episode 終了時の全フラグ reset (resume / idle 落ちで使用)。model.md は iterative
-# update 用に保持し、episode stamp / compacted / prepare_prompted のみ消す。
+# update 用に保持し、episode stamp / compacted / prepare_prompted / compact_defer のみ消す。
 ctx_episode_reset() {
     local sess="$1"
     ctx_episode_clear "${sess}"
     ctx_flag_clear compacted "${sess}"
     ctx_flag_clear prepare_prompted "${sess}"
+    ctx_defer_clear "${sess}"
 }
 
 # ctx_pane_owner <state_dir> <pane> → 引数 pane を記録した state/*.json のうち最新 (mtime
@@ -267,6 +279,6 @@ ctx_gc() {
     # DISABLED は kill switch なので age に関わらず除外 (パターン非該当だが防御的に明示)。
     # .last_gc は GC 自身の debounce マーカー: 自己削除すると日次 cadence が乱れるため除外。
     find "${home}" -maxdepth 1 -type f ! -name 'DISABLED' ! -name '.last_gc' \
-        \( -name '.compacted_*' -o -name '.episode_*' -o -name '.prepare_prompted_*' -o -name '.last_*' -o -name '.lastinject_*' -o -name '.gen_*' \) \
+        \( -name '.compacted_*' -o -name '.episode_*' -o -name '.prepare_prompted_*' -o -name '.last_*' -o -name '.lastinject_*' -o -name '.gen_*' -o -name '.compact_defer_*' -o -name '.compact_tr_lines_*' \) \
         -mtime +"${mdays}" -delete 2>/dev/null || true
 }

@@ -122,5 +122,37 @@ assert_contains "$(run "${T}" 'idle prompt >' 0 '%9')" "%9 /compact" "記録 pan
 T="$(mktemp -d)"; export CC_COMPACTION_HOME="${T}"; mk "${T}" critical both
 assert_contains "$(run "${T}")" "/compact" "model.md + 機械版両方 → /compact (model.md 在り)"
 
+# === I1: /compact 送出前の入力欄 bounded defer (ユーザー下書き clobber 防止) ===
+# 入力欄 (───罫線間) にユーザーの下書きがある間は圧縮を defer (重ねて clobber しない)。ただし連続 defer
+# が COMPACT_DEFER_MAX を超えたら下書きを犠牲にしても圧縮する (box false-positive 等で圧縮が恒久
+# ブロック=overflow=stall方向に倒れるのを防ぐ。stall < clobber のユーザー安全原則)。
+BOXUSER='hist
+─────
+❯ ユーザーが先に打った長めの下書きテキストです
+─────
+👤 footer'
+# 15) 1回目: 入力欄に下書き → 圧縮 defer (注入なし) かつ compacted 非設定 (clobber 防止)、counter=1
+T="$(mktemp -d)"; export CC_COMPACTION_HOME="${T}"; export COMPACT_DEFER_MAX=2; mk "${T}" critical model
+assert_eq "$(run "${T}" "${BOXUSER}")" "" "I1: 入力欄に下書き → 圧縮 defer (注入なし)"
+assert_eq "$([ -e "${T}/.compacted_wt-a" ] && echo SET || echo UNSET)" "UNSET" "I1: defer 中は compacted を立てない"
+assert_eq "$(cat "${T}/.compact_defer_wt-a" 2>/dev/null)" "1" "I1: defer counter = 1"
+# 16) 2回目: まだ上限(2)未満 → defer 継続、counter=2
+assert_eq "$(run "${T}" "${BOXUSER}")" "" "I1: 2回目も defer (注入なし)"
+assert_eq "$(cat "${T}/.compact_defer_wt-a" 2>/dev/null)" "2" "I1: defer counter = 2"
+# 17) 3回目: 上限(2)到達 → 入力欄を C-u clear してから /compact 送出 (下書き連結を防ぎ実際に圧縮成立)
+OUT17="$(run "${T}" "${BOXUSER}")"
+assert_contains "${OUT17}" "/compact" "I1: defer 上限到達 → /compact (overflow/stall 防止)"
+assert_contains "${OUT17}" "C-u" "I1: cap で C-u 入力欄 clear してから圧縮 (Codex I1/C2: 下書き連結=圧縮不発を防ぐ)"
+unset COMPACT_DEFER_MAX
+# 18) 空入力欄 (下書きなし) → defer せず即 /compact、counter も付かない
+EMPTYBOX='hist
+─────
+❯
+─────
+👤 footer'
+T="$(mktemp -d)"; export CC_COMPACTION_HOME="${T}"; mk "${T}" critical model
+assert_contains "$(run "${T}" "${EMPTYBOX}")" "/compact" "I1: 空入力欄 → defer せず /compact"
+assert_eq "$([ -e "${T}/.compact_defer_wt-a" ] && echo SET || echo UNSET)" "UNSET" "I1: 空入力欄 → defer counter 付かない"
+
 rm -rf "${TMOCK}" "${T}"
 report

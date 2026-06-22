@@ -61,13 +61,14 @@ printf 'app ❯ idle\n' > "${T}/capseq"   # poll 即 idle (リロード待ち無
 run_inject_seq "${T}" 0 0 0 4
 assert_contains "$(cat "${T}/sleep.log")" "4" "テキスト送出後に settle (RESUME_SETTLE_SECONDS=4) が入る"
 
-# (c) 送出順: /compact Enter → 本文(テキストのみ) → 単独 Enter。本文行に Enter を束ねない。
+# (c) 送出順: C-u (入力欄clear) → /compact Enter → 本文(テキストのみ) → 単独 Enter。本文行に Enter を束ねない。
 T="$(mktemp -d)"
 printf 'app ❯ idle\n' > "${T}/capseq"
 run_inject_seq "${T}" 0 0 0 0
-assert_eq "$(sed -n '1p' "${T}/send.log")" "-t %5 /compact Enter" "1 行目 = /compact Enter"
-assert_eq "$(sed -n '2p' "${T}/send.log" | grep -cE ' Enter$')" "0" "2 行目 (本文) は Enter を束ねない"
-assert_eq "$(sed -n '3p' "${T}/send.log")" "-t %5 Enter" "3 行目 = 単独 Enter"
+assert_eq "$(sed -n '1p' "${T}/send.log")" "-t %5 C-u" "1 行目 = 入力欄 clear (C-u)"
+assert_eq "$(sed -n '2p' "${T}/send.log")" "-t %5 /compact Enter" "2 行目 = /compact Enter"
+assert_eq "$(sed -n '3p' "${T}/send.log" | grep -cE ' Enter$')" "0" "3 行目 (本文) は Enter を束ねない"
+assert_eq "$(sed -n '4p' "${T}/send.log")" "-t %5 Enter" "4 行目 = 単独 Enter"
 
 rm -rf "${TMOCK}" "${T}"
 report
