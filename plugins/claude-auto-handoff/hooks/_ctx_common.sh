@@ -148,7 +148,8 @@ try:
     lines = open(sys.argv[1], errors="replace").read().splitlines()
 except OSError:
     sys.exit(1)
-head_like = re.compile(r'^\s*(#{1,6}\s|\d+\s*[.)]\s)')
+# heading-form only: markdown #, bold **, or numbered N. (trailing space optional for '3.NEXT STEPS')
+head_like = re.compile(r'^\s*(#{1,6}\s|\*{2}\s*|\d+\s*[.)])')
 start = None
 for i, l in enumerate(lines):
     if "NEXT STEPS" in l.upper() and head_like.match(l):

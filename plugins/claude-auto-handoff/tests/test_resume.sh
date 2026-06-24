@@ -188,13 +188,22 @@ assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/listy.md" && echo THIN || echo 
 # 22) ヘルパ単体: min_chars 引数で閾値を上書きできる
 assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/fat.md" 99999 && echo THIN || echo OK)" "THIN" "P1b: min_chars 引数で閾値上書き (大きすれば thin 判定)"
 # 22b) 散文で 'NEXT STEPS' に言及しても見出し行のみを見出しと認識し実節 (充実) を測る (false THIN を出さない)
-printf '## 2. STATE\nここで状態を説明する。詳細は後述の NEXT STEPS 節を参照すること。\n## 3. NEXT STEPS\n1. まず対象を読み込んで状態を把握する\n2. 実装してテストを通す\n3. レビューに出す\n## 4. X\n' > "${TMP}/prose.md"
+printf '## 2. STATE\nここで状態を説明する。詳細は後述の NEXT STEPS 節を参照すること。\n## 3. NEXT STEPS\n1. まず対象ファイルを読み込んで現在の状態を正確に把握する\n2. 実装を進めて全てのテストを通す\n3. 最後に全体を確認し問題なければレビューに出す\n## 4. X\n' > "${TMP}/prose.md"
 assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/prose.md" && echo THIN || echo OK)" "OK" "P1b minor: 散文の 'NEXT STEPS' 言及を見出し誤認しない"
 # 22c) 散文言及のみ (実見出し無し) → 薄いと断定しない (not thin)
 printf '## 1. GOAL\nやること\n## 2. STATE\n後で NEXT STEPS を埋める予定。\n' > "${TMP}/prose_only.md"
 assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/prose_only.md" && echo THIN || echo OK)" "OK" "P1b minor: 散文言及のみ (実見出し無し) → 薄いと断定しない"
 # 22d) 非数値 min_chars (誤設定) → 安全側 (not thin = 警告抑制)
 assert_eq "$(NEXT_STEPS_MIN_CHARS=abc ctx_handoff_next_steps_thin "${TMP}/thin.md" && echo THIN || echo OK)" "OK" "P1b minor: 非数値 NEXT_STEPS_MIN_CHARS → not thin (安全側)"
+# 22e) 無空白番号見出し '3.NEXT STEPS' (ctx-prepare-stop 指示形) も見出しと認識し薄さを測る
+printf '## 2. STATE\n状態の本文。\n3.NEXT STEPS\n1. 続き\n## 4. X\n' > "${TMP}/nospace.md"
+assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/nospace.md" && echo THIN || echo OK)" "THIN" "P1b minor: 無空白番号見出し '3.NEXT STEPS' も見出しと認識する"
+# 22f) bold 見出し '**NEXT STEPS**' も見出しと認識する
+printf '## 2. STATE\n状態の本文。\n**NEXT STEPS**\n1. 続き\n## 4. X\n' > "${TMP}/bold.md"
+assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/bold.md" && echo THIN || echo OK)" "THIN" "P1b nit: bold 見出し '**NEXT STEPS**' も見出しと認識する"
+# 22g) 単一アスタリスク bullet は見出し誤認しない (bold は ** のみ)
+printf '## 2. STATE\n* 後述の NEXT STEPS 節を参照\n## 3. NEXT STEPS\n1. まず対象ファイルを読み込んで現在の状態を正確に把握する\n2. 実装を進めて全てのテストを通す\n3. 最後に全体を確認しレビューに出す\n## 4. X\n' > "${TMP}/bullet.md"
+assert_eq "$(ctx_handoff_next_steps_thin "${TMP}/bullet.md" && echo THIN || echo OK)" "OK" "P1b: 単一アスタリスク bullet を見出し誤認しない"
 
 # 23) 統合: 薄い NEXT STEPS の handoff + source=clear → additionalContext に補強ガイダンス
 TMP="$(mktemp -d)"; export CC_COMPACTION_HOME="${TMP}"; mkdir -p "${TMP}/handoffs"
